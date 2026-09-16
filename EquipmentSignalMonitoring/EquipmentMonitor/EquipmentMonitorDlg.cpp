@@ -8,6 +8,9 @@
 #include "EquipmentMonitorDlg.h"
 #include "afxdialogex.h"
 
+#include <string>
+#include <cstring>
+
 #ifdef _DEBUG
 #define new DEBUG_NEW
 #endif
@@ -54,6 +57,9 @@ CEquipmentMonitorDlg::CEquipmentMonitorDlg(CWnd* pParent /*=nullptr*/)
 	: CDialogEx(IDD_EQUIPMENTMONITOR_DIALOG, pParent)
 {
 	m_hIcon = AfxGetApp()->LoadIcon(IDR_MAINFRAME);
+
+	m_clientSocket = INVALID_SOCKET;
+	m_isConnected = false;
 }
 
 void CEquipmentMonitorDlg::DoDataExchange(CDataExchange* pDX)
@@ -65,6 +71,25 @@ BEGIN_MESSAGE_MAP(CEquipmentMonitorDlg, CDialogEx)
 	ON_WM_SYSCOMMAND()
 	ON_WM_PAINT()
 	ON_WM_QUERYDRAGICON()
+
+	ON_BN_CLICKED(
+		IDC_BUTTON_CONNECT, 
+		&CEquipmentMonitorDlg::OnBnClickedButtonConnect
+	)
+
+	ON_MESSAGE(
+		WM_RECEIVE_EQUIPMENT_DATA,
+		&CEquipmentMonitorDlg::OnReceiveEquipmentData
+	)
+
+	ON_BN_CLICKED(
+		IDC_BUTTON_START, 
+		&CEquipmentMonitorDlg::OnBnClickedButtonStart
+	)
+	ON_BN_CLICKED(
+		IDC_BUTTON_STOP, 
+		&CEquipmentMonitorDlg::OnBnClickedButtonStop
+	)
 END_MESSAGE_MAP()
 
 
@@ -106,7 +131,7 @@ BOOL CEquipmentMonitorDlg::OnInitDialog()
 	// Equipment Status 초기값
 	SetDlgItemText(IDC_STATIC_SIGNAL, _T("0.00"));
 	SetDlgItemText(IDC_STATIC_FREQUENCY, _T("0 Hz"));
-	SetDlgItemText(IDC_STATIC_TEMPERATURE, _T("0.0 C"));
+	SetDlgItemText(IDC_STATIC_TEMPERATURE, _T("0.0 °C"));
 	SetDlgItemText(IDC_STATIC_STATUS, _T("DISCONNECTED"));
 
 	GetDlgItem(IDC_BUTTON_START)->EnableWindow(FALSE);
@@ -162,4 +187,265 @@ void CEquipmentMonitorDlg::OnPaint()
 HCURSOR CEquipmentMonitorDlg::OnQueryDragIcon()
 {
 	return static_cast<HCURSOR>(m_hIcon);
+}
+
+void CEquipmentMonitorDlg::OnBnClickedButtonConnect()
+{
+	if (m_isConnected)
+	{
+		AfxMessageBox(_T("Already connected."));
+		return;
+	}
+
+	WSADATA wsaData;
+
+	if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
+	{
+		AfxMessageBox(_T("WSAStartup failed."));
+		return;
+	}
+
+	m_clientSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+
+	if (m_clientSocket == INVALID_SOCKET)
+	{
+		AfxMessageBox(_T("Socket creation failed."));
+		WSACleanup();
+		return;
+	}
+
+	CString ipText;
+	CString portText;
+
+	GetDlgItemText(IDC_EDIT_IP, ipText);
+	GetDlgItemText(IDC_EDIT_PORT, portText);
+
+	int port = _ttoi(portText);
+
+	sockaddr_in serverAddr{};
+	serverAddr.sin_family = AF_INET;
+	serverAddr.sin_port = htons(port);
+
+	CT2A ipAnsi(ipText);
+
+	if (inet_pton(AF_INET, ipAnsi, &serverAddr.sin_addr) != 1)
+	{
+		AfxMessageBox(_T("Invalid IP address."));
+
+		closesocket(m_clientSocket);
+		m_clientSocket = INVALID_SOCKET;
+		WSACleanup();
+
+		return;
+	}
+
+	int result = connect(
+		m_clientSocket,
+		reinterpret_cast<sockaddr*>(&serverAddr),
+		sizeof(serverAddr)
+	);
+
+	if (result == SOCKET_ERROR)
+	{
+		AfxMessageBox(_T("Connection failed."));
+
+		closesocket(m_clientSocket);
+		m_clientSocket = INVALID_SOCKET;
+		WSACleanup();
+
+		return;
+	}
+
+	m_isConnected = true;
+
+	AfxBeginThread(
+		ReceiveThread,
+		this
+	);
+
+	SetDlgItemText(IDC_STATIC_STATUS, _T("CONNECTED"));
+
+	GetDlgItem(IDC_BUTTON_START)->EnableWindow(TRUE);
+	GetDlgItem(IDC_BUTTON_STOP)->EnableWindow(FALSE);
+
+	AfxMessageBox(_T("Connected successfully."));
+}
+
+UINT CEquipmentMonitorDlg::ReceiveThread(LPVOID pParam)
+{
+	CEquipmentMonitorDlg* pDlg =
+		static_cast<CEquipmentMonitorDlg*>(pParam);
+
+	char buffer[1024];
+
+	std::string receiveBuffer;
+
+	while (pDlg->m_isConnected)
+	{
+		int received = recv(
+			pDlg->m_clientSocket,
+			buffer,
+			sizeof(buffer) - 1,
+			0
+		);
+
+		if (received <= 0)
+		{
+			break;
+		}
+
+		buffer[received] = '\0';
+
+		receiveBuffer += buffer;
+
+		size_t newlinePos;
+
+		while (
+			(newlinePos = receiveBuffer.find('\n'))
+			!= std::string::npos
+			)
+		{
+			std::string line =
+				receiveBuffer.substr(0, newlinePos);
+
+			receiveBuffer.erase(
+				0,
+				newlinePos + 1
+			);
+
+			double signal = 0.0;
+			int frequency = 0;
+			double temperature = 0.0;
+			char status[32]{};
+
+			int parsed = sscanf_s(
+				line.c_str(),
+				"Signal=%lf;Frequency=%d;Temperature=%lf;Status=%31s",
+				&signal,
+				&frequency,
+				&temperature,
+				status,
+				static_cast<unsigned>(_countof(status))
+			);
+
+			if (parsed == 4)
+			{
+				EquipmentData* data =
+					new EquipmentData;
+
+				data->signal = signal;
+				data->frequency = frequency;
+				data->temperature = temperature;
+				data->status = CString(status);
+
+				pDlg->PostMessage(
+					WM_RECEIVE_EQUIPMENT_DATA,
+					0,
+					reinterpret_cast<LPARAM>(data)
+				);
+			}
+		}
+	}
+
+	pDlg->m_isConnected = false;
+
+	return 0;
+}
+
+LRESULT CEquipmentMonitorDlg::OnReceiveEquipmentData(
+	WPARAM wParam,
+	LPARAM lParam
+)
+{
+	EquipmentData* data =
+		reinterpret_cast<EquipmentData*>(lParam);
+
+	if (data == nullptr)
+	{
+		return 0;
+	}
+
+	CString text;
+
+	text.Format(_T("%.2f"), data->signal);
+	SetDlgItemText(IDC_STATIC_SIGNAL, text);
+
+	text.Format(_T("%d Hz"), data->frequency);
+	SetDlgItemText(IDC_STATIC_FREQUENCY, text);
+
+	text.Format(_T("%.2f °C"), data->temperature);
+	SetDlgItemText(IDC_STATIC_TEMPERATURE, text);
+
+	SetDlgItemText(
+		IDC_STATIC_STATUS,
+		data->status
+	);
+
+	delete data;
+
+	return 0;
+}
+
+void CEquipmentMonitorDlg::OnBnClickedButtonStart()
+{
+	if (!m_isConnected)
+	{
+		AfxMessageBox(_T("Not connected."));
+		return;
+	}
+
+	const char* command = "START\n";
+
+	int result = send(
+		m_clientSocket,
+		command,
+		static_cast<int>(strlen(command)),
+		0
+	);
+
+	if (result == SOCKET_ERROR)
+	{
+		AfxMessageBox(_T("Failed to send START command."));
+		return;
+	}
+
+	SetDlgItemText(
+		IDC_STATIC_STATUS,
+		_T("RUNNING")
+	);
+
+	GetDlgItem(IDC_BUTTON_START)->EnableWindow(FALSE);
+	GetDlgItem(IDC_BUTTON_STOP)->EnableWindow(TRUE);
+}
+
+void CEquipmentMonitorDlg::OnBnClickedButtonStop()
+{
+	if (!m_isConnected)
+	{
+		AfxMessageBox(_T("Not connected."));
+		return;
+	}
+
+	const char* command = "STOP\n";
+
+	int result = send(
+		m_clientSocket,
+		command,
+		static_cast<int>(strlen(command)),
+		0
+	);
+
+	if (result == SOCKET_ERROR)
+	{
+		AfxMessageBox(_T("Failed to send STOP command."));
+		return;
+	}
+
+	SetDlgItemText(
+		IDC_STATIC_STATUS,
+		_T("STOPPED")
+	);
+
+	GetDlgItem(IDC_BUTTON_START)->EnableWindow(TRUE);
+	GetDlgItem(IDC_BUTTON_STOP)->EnableWindow(FALSE);
 }
