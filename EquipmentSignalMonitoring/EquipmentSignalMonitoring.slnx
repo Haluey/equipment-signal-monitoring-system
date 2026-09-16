@@ -1,0 +1,8 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="EquipmentMonitor/EquipmentMonitor.vcxproj" />
+  <Project Path="EquipmentSimulator/EquipmentSimulator.vcxproj" Id="c075c872-0dc3-470a-bf94-320c7c203929" />
+</Solution>
