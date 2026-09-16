@@ -6,16 +6,19 @@
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <vector>
+#include <fstream>
 
 #pragma comment(lib, "ws2_32.lib")
 
 #define WM_RECEIVE_EQUIPMENT_DATA (WM_APP + 1)
+#define WM_DISCONNECTED (WM_APP + 2)
 
 struct EquipmentData
 {
-	double signal;
-	int frequency;
-	double temperature;
+	double signal = 0.0;
+	int frequency = 0;
+	double temperature = 0.0;
 	CString status;
 };
 
@@ -45,15 +48,32 @@ protected:
 	afx_msg void OnSysCommand(UINT nID, LPARAM lParam);
 	afx_msg void OnPaint();
 	afx_msg HCURSOR OnQueryDragIcon();
+	afx_msg void OnDestroy();
+
 	DECLARE_MESSAGE_MAP()
 private:
 	SOCKET m_clientSocket;
 	bool m_isConnected;
 
+	double m_temperatureThreshold;
+	
+	std::vector<double> m_signalHistory;
+
 	static UINT ReceiveThread(LPVOID pParam);
+	void AddLog(const CString& message);
+	void HandleCommunicationError(const CString& message);
+
+	CString m_previousStatus;
+
+	std::ofstream m_csvFile;
+	bool m_isCsvSaving;
 public:
 	afx_msg void OnBnClickedButtonConnect();
 	afx_msg LRESULT OnReceiveEquipmentData(WPARAM wParam, LPARAM lParam);
 	afx_msg void OnBnClickedButtonStart();
 	afx_msg void OnBnClickedButtonStop();
+	afx_msg void OnDrawItem(int nIDCtl, LPDRAWITEMSTRUCT lpDrawItemStruct);
+	afx_msg LRESULT OnDisconnected(WPARAM wParam, LPARAM lParam);
+	afx_msg void OnBnClickedButtonSaveCsv();
+	afx_msg void OnBnClickedButtonApplyThreshold();
 };

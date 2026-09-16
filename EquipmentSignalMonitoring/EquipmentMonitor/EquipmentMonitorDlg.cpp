@@ -60,6 +60,10 @@ CEquipmentMonitorDlg::CEquipmentMonitorDlg(CWnd* pParent /*=nullptr*/)
 
 	m_clientSocket = INVALID_SOCKET;
 	m_isConnected = false;
+	m_temperatureThreshold = 37.0;
+
+	m_previousStatus = _T("DISCONNECTED");
+	m_isCsvSaving = false;
 }
 
 void CEquipmentMonitorDlg::DoDataExchange(CDataExchange* pDX)
@@ -71,6 +75,8 @@ BEGIN_MESSAGE_MAP(CEquipmentMonitorDlg, CDialogEx)
 	ON_WM_SYSCOMMAND()
 	ON_WM_PAINT()
 	ON_WM_QUERYDRAGICON()
+	ON_WM_DRAWITEM()
+	ON_WM_DESTROY()
 
 	ON_BN_CLICKED(
 		IDC_BUTTON_CONNECT, 
@@ -90,6 +96,21 @@ BEGIN_MESSAGE_MAP(CEquipmentMonitorDlg, CDialogEx)
 		IDC_BUTTON_STOP, 
 		&CEquipmentMonitorDlg::OnBnClickedButtonStop
 	)
+
+	ON_MESSAGE(
+		WM_DISCONNECTED,
+		&CEquipmentMonitorDlg::OnDisconnected
+	)
+
+	ON_BN_CLICKED(
+		IDC_BUTTON_SAVE_CSV, 
+		&CEquipmentMonitorDlg::OnBnClickedButtonSaveCsv
+	)
+	ON_BN_CLICKED(
+		IDC_BUTTON_APPLY_THRESHOLD, 
+		&CEquipmentMonitorDlg::OnBnClickedButtonApplyThreshold
+	)
+
 END_MESSAGE_MAP()
 
 
@@ -133,9 +154,18 @@ BOOL CEquipmentMonitorDlg::OnInitDialog()
 	SetDlgItemText(IDC_STATIC_FREQUENCY, _T("0 Hz"));
 	SetDlgItemText(IDC_STATIC_TEMPERATURE, _T("0.0 °C"));
 	SetDlgItemText(IDC_STATIC_STATUS, _T("DISCONNECTED"));
+	SetDlgItemText(IDC_EDIT_TEMP_THRESHOLD, _T("37.0"));
 
 	GetDlgItem(IDC_BUTTON_START)->EnableWindow(FALSE);
 	GetDlgItem(IDC_BUTTON_STOP)->EnableWindow(FALSE);
+
+	// 그래프 Static을 Owner Draw로 설정
+	CWnd* pGraph = GetDlgItem(IDC_STATIC_GRAPH);
+
+	if (pGraph != nullptr)
+	{
+		pGraph->ModifyStyle(SS_TYPEMASK, SS_OWNERDRAW);
+	}
 
 	return TRUE;  // 포커스를 컨트롤에 설정하지 않으면 TRUE를 반환합니다.
 }
@@ -247,16 +277,25 @@ void CEquipmentMonitorDlg::OnBnClickedButtonConnect()
 
 	if (result == SOCKET_ERROR)
 	{
-		AfxMessageBox(_T("Connection failed."));
+		HandleCommunicationError(
+			_T("Connection failed")
+		);
+
+		AfxMessageBox(
+			_T("Connection failed.")
+		);
 
 		closesocket(m_clientSocket);
 		m_clientSocket = INVALID_SOCKET;
+
 		WSACleanup();
 
 		return;
 	}
 
 	m_isConnected = true;
+
+	AddLog(_T("CONNECTED"));
 
 	AfxBeginThread(
 		ReceiveThread,
@@ -267,6 +306,13 @@ void CEquipmentMonitorDlg::OnBnClickedButtonConnect()
 
 	GetDlgItem(IDC_BUTTON_START)->EnableWindow(TRUE);
 	GetDlgItem(IDC_BUTTON_STOP)->EnableWindow(FALSE);
+
+	// 연결 중에는 중복 연결 방지
+	GetDlgItem(IDC_BUTTON_CONNECT)->EnableWindow(FALSE);
+
+	// 연결된 주소를 임의로 변경하지 못하도록 비활성화
+	GetDlgItem(IDC_EDIT_IP)->EnableWindow(FALSE);
+	GetDlgItem(IDC_EDIT_PORT)->EnableWindow(FALSE);
 
 	AfxMessageBox(_T("Connected successfully."));
 }
@@ -349,6 +395,12 @@ UINT CEquipmentMonitorDlg::ReceiveThread(LPVOID pParam)
 
 	pDlg->m_isConnected = false;
 
+	pDlg->PostMessage(
+		WM_DISCONNECTED,
+		0,
+		0
+	);
+
 	return 0;
 }
 
@@ -370,16 +422,88 @@ LRESULT CEquipmentMonitorDlg::OnReceiveEquipmentData(
 	text.Format(_T("%.2f"), data->signal);
 	SetDlgItemText(IDC_STATIC_SIGNAL, text);
 
+	m_signalHistory.push_back(data->signal);
+
+	if (m_signalHistory.size() > 50)
+	{
+		m_signalHistory.erase(m_signalHistory.begin());
+	}
+
+	CWnd* pGraph = GetDlgItem(IDC_STATIC_GRAPH);
+
+	if (pGraph != nullptr)
+	{
+		pGraph->Invalidate();
+	}
+
 	text.Format(_T("%d Hz"), data->frequency);
 	SetDlgItemText(IDC_STATIC_FREQUENCY, text);
 
 	text.Format(_T("%.2f °C"), data->temperature);
 	SetDlgItemText(IDC_STATIC_TEMPERATURE, text);
 
+	CString currentStatus;
+
+	if (data->temperature >= m_temperatureThreshold)
+	{
+		currentStatus = _T("WARNING");
+	}
+	else
+	{
+		currentStatus = _T("NORMAL");
+	}
+
 	SetDlgItemText(
 		IDC_STATIC_STATUS,
-		data->status
+		currentStatus
 	);
+
+	if (currentStatus != m_previousStatus)
+	{
+		if (currentStatus == _T("WARNING"))
+		{
+			CString warningLog;
+
+			warningLog.Format(
+				_T("WARNING  Temp=%.2f °C"),
+				data->temperature
+			);
+
+			AddLog(warningLog);
+		}
+		else if (
+			currentStatus == _T("NORMAL") &&
+			m_previousStatus == _T("WARNING")
+		)
+		{
+			AddLog(_T("RECOVERED  Status=NORMAL"));
+		}
+
+		m_previousStatus = currentStatus;
+	}
+
+	if (m_isCsvSaving && m_csvFile.is_open())
+	{
+		CTime now = CTime::GetCurrentTime();
+
+		CString timeText =
+			now.Format(_T("%H:%M:%S"));
+
+		CT2A timeAnsi(timeText);
+		CT2A statusAnsi(currentStatus);
+
+		m_csvFile
+			<< timeAnsi.m_psz
+			<< ","
+			<< data->signal
+			<< ","
+			<< data->frequency
+			<< ","
+			<< data->temperature
+			<< ","
+			<< statusAnsi.m_psz
+			<< std::endl;
+	}
 
 	delete data;
 
@@ -405,7 +529,14 @@ void CEquipmentMonitorDlg::OnBnClickedButtonStart()
 
 	if (result == SOCKET_ERROR)
 	{
-		AfxMessageBox(_T("Failed to send START command."));
+		HandleCommunicationError(
+			_T("START command send failed")
+		);
+
+		AfxMessageBox(
+			_T("Failed to send START command.")
+		);
+
 		return;
 	}
 
@@ -413,6 +544,8 @@ void CEquipmentMonitorDlg::OnBnClickedButtonStart()
 		IDC_STATIC_STATUS,
 		_T("RUNNING")
 	);
+
+	AddLog(_T("START"));
 
 	GetDlgItem(IDC_BUTTON_START)->EnableWindow(FALSE);
 	GetDlgItem(IDC_BUTTON_STOP)->EnableWindow(TRUE);
@@ -437,7 +570,14 @@ void CEquipmentMonitorDlg::OnBnClickedButtonStop()
 
 	if (result == SOCKET_ERROR)
 	{
-		AfxMessageBox(_T("Failed to send STOP command."));
+		HandleCommunicationError(
+			_T("STOP command send failed")
+		);
+
+		AfxMessageBox(
+			_T("Failed to send STOP command.")
+		);
+
 		return;
 	}
 
@@ -446,6 +586,339 @@ void CEquipmentMonitorDlg::OnBnClickedButtonStop()
 		_T("STOPPED")
 	);
 
+	AddLog(_T("STOP"));
+
 	GetDlgItem(IDC_BUTTON_START)->EnableWindow(TRUE);
 	GetDlgItem(IDC_BUTTON_STOP)->EnableWindow(FALSE);
+}
+
+void CEquipmentMonitorDlg::OnDrawItem(
+	int nIDCtl,
+	LPDRAWITEMSTRUCT lpDrawItemStruct
+)
+{
+	if (nIDCtl == IDC_STATIC_GRAPH)
+	{
+		CDC dc;
+		dc.Attach(lpDrawItemStruct->hDC);
+
+		CRect rect = lpDrawItemStruct->rcItem;
+
+		// 배경 지우기
+		dc.FillSolidRect(rect, RGB(255, 255, 255));
+
+		// 그래프 테두리
+		dc.Rectangle(rect);
+
+		// 그래프 안쪽 여백
+		CRect graphRect = rect;
+		graphRect.DeflateRect(10, 10);
+
+		// 그래프 기준선
+		CPen gridPen(
+			PS_DOT,
+			1,
+			RGB(200, 200, 200)
+		);
+
+		CPen* pOldPen = dc.SelectObject(&gridPen);
+
+		int y25 = graphRect.bottom -
+			static_cast<int>(0.25 * graphRect.Height());
+
+		int y50 = graphRect.bottom -
+			static_cast<int>(0.50 * graphRect.Height());
+
+		int y75 = graphRect.bottom -
+			static_cast<int>(0.75 * graphRect.Height());
+
+		dc.MoveTo(graphRect.left, y25);
+		dc.LineTo(graphRect.right, y25);
+
+		dc.MoveTo(graphRect.left, y50);
+		dc.LineTo(graphRect.right, y50);
+
+		dc.MoveTo(graphRect.left, y75);
+		dc.LineTo(graphRect.right, y75);
+
+		dc.SelectObject(pOldPen);
+
+		if (m_signalHistory.size() >= 2)
+		{
+			int count =
+				static_cast<int>(m_signalHistory.size());
+
+			int width = graphRect.Width();
+			int height = graphRect.Height();
+
+			CPen signalPen(
+				PS_SOLID,
+				2,
+				RGB(0, 0, 0)
+			);
+
+			CPen* pOldSignalPen =
+				dc.SelectObject(&signalPen);
+
+			for (int i = 1; i < count; ++i)
+			{
+				double previousValue =
+					m_signalHistory[i - 1];
+
+				double currentValue =
+					m_signalHistory[i];
+
+				int x1 =
+					graphRect.left +
+					(i - 1) * width / (count - 1);
+
+				int x2 =
+					graphRect.left +
+					i * width / (count - 1);
+
+				int y1 =
+					graphRect.bottom -
+					static_cast<int>(
+						previousValue * height
+						);
+
+				int y2 =
+					graphRect.bottom -
+					static_cast<int>(
+						currentValue * height
+						);
+
+				dc.MoveTo(x1, y1);
+				dc.LineTo(x2, y2);
+			}
+
+			dc.SelectObject(pOldSignalPen);
+		}
+
+		dc.Detach();
+
+		return;
+	}
+
+	CDialogEx::OnDrawItem(
+		nIDCtl,
+		lpDrawItemStruct
+	);
+}
+
+void CEquipmentMonitorDlg::AddLog(const CString& message)
+{
+	CTime now = CTime::GetCurrentTime();
+
+	CString logText;
+	logText.Format(
+		_T("%02d:%02d:%02d  %s"),
+		now.GetHour(),
+		now.GetMinute(),
+		now.GetSecond(),
+		message.GetString()
+	);
+
+	CListBox* pLog =
+		static_cast<CListBox*>(GetDlgItem(IDC_LIST_LOG));
+
+	if (pLog != nullptr)
+	{
+		pLog->AddString(logText);
+
+		int count = pLog->GetCount();
+
+		if (count > 0)
+		{
+			pLog->SetCurSel(count - 1);
+		}
+	}
+}
+
+LRESULT CEquipmentMonitorDlg::OnDisconnected(
+	WPARAM wParam,
+	LPARAM lParam
+)
+{
+	SetDlgItemText(
+		IDC_STATIC_STATUS,
+		_T("DISCONNECTED")
+	);
+
+	GetDlgItem(IDC_BUTTON_START)->EnableWindow(FALSE);
+	GetDlgItem(IDC_BUTTON_STOP)->EnableWindow(FALSE);
+
+	// 다시 연결할 수 있도록 CONNECT 활성화
+	GetDlgItem(IDC_BUTTON_CONNECT)->EnableWindow(TRUE);
+
+	// IP / Port도 다시 수정 가능
+	GetDlgItem(IDC_EDIT_IP)->EnableWindow(TRUE);
+	GetDlgItem(IDC_EDIT_PORT)->EnableWindow(TRUE);
+
+	// 이전 상태 초기화
+	m_previousStatus = _T("DISCONNECTED");
+
+	AddLog(_T("DISCONNECTED"));
+
+	if (m_clientSocket != INVALID_SOCKET)
+	{
+		closesocket(m_clientSocket);
+		m_clientSocket = INVALID_SOCKET;
+	}
+
+	WSACleanup();
+
+	return 0;
+}
+
+void CEquipmentMonitorDlg::OnBnClickedButtonSaveCsv()
+{
+	if (!m_isCsvSaving)
+	{
+		CTime now = CTime::GetCurrentTime();
+
+		CString defaultFileName;
+		defaultFileName.Format(
+			_T("equipment_log_%04d%02d%02d_%02d%02d%02d.csv"),
+			now.GetYear(),
+			now.GetMonth(),
+			now.GetDay(),
+			now.GetHour(),
+			now.GetMinute(),
+			now.GetSecond()
+		);
+
+		CFileDialog dlg(
+			FALSE,                          // FALSE = 저장
+			_T("csv"),                      // 기본 확장자
+			defaultFileName,                // 기본 파일명
+			OFN_HIDEREADONLY |
+			OFN_OVERWRITEPROMPT,
+			_T("CSV Files (*.csv)|*.csv||"),
+			this
+		);
+
+		if (dlg.DoModal() != IDOK)
+		{
+			return;
+		}
+
+		CString filePath = dlg.GetPathName();
+
+		CT2A filePathAnsi(filePath);
+
+		m_csvFile.open(filePathAnsi);
+
+		if (!m_csvFile.is_open())
+		{
+			AfxMessageBox(_T("CSV file open failed."));
+			return;
+		}
+
+		m_csvFile
+			<< "timestamp,signal,frequency,temperature,status"
+			<< std::endl;
+
+		m_isCsvSaving = true;
+
+		SetDlgItemText(
+			IDC_BUTTON_SAVE_CSV,
+			_T("STOP CSV")
+		);
+
+		AddLog(_T("CSV SAVE START"));
+	}
+	else
+	{
+		if (m_csvFile.is_open())
+		{
+			m_csvFile.close();
+		}
+
+		m_isCsvSaving = false;
+
+		SetDlgItemText(
+			IDC_BUTTON_SAVE_CSV,
+			_T("SAVE CSV")
+		);
+
+		AddLog(_T("CSV SAVE STOP"));
+	}
+}
+
+void CEquipmentMonitorDlg::OnBnClickedButtonApplyThreshold()
+{
+	CString thresholdText;
+
+	GetDlgItemText(
+		IDC_EDIT_TEMP_THRESHOLD,
+		thresholdText
+	);
+
+	double newThreshold = _ttof(thresholdText);
+
+	if (newThreshold <= 0.0)
+	{
+		AfxMessageBox(
+			_T("Please enter a valid temperature threshold.")
+		);
+
+		return;
+	}
+
+	m_temperatureThreshold = newThreshold;
+
+	CString logText;
+
+	logText.Format(
+		_T("THRESHOLD CHANGED  Temp=%.1f C"),
+		m_temperatureThreshold
+	);
+
+	AddLog(logText);
+}
+
+void CEquipmentMonitorDlg::HandleCommunicationError(
+	const CString& message
+)
+{
+	SetDlgItemText(
+		IDC_STATIC_STATUS,
+		_T("ERROR")
+	);
+
+	CString logText;
+	logText.Format(
+		_T("COMM ERROR  %s"),
+		message.GetString()
+	);
+
+	AddLog(logText);
+}
+
+void CEquipmentMonitorDlg::OnDestroy()
+{
+	// 수신 스레드 종료 유도
+	m_isConnected = false;
+
+	// 소켓 종료
+	if (m_clientSocket != INVALID_SOCKET)
+	{
+		shutdown(m_clientSocket, SD_BOTH);
+		closesocket(m_clientSocket);
+		m_clientSocket = INVALID_SOCKET;
+	}
+
+	// CSV 파일이 열려 있으면 닫기
+	if (m_csvFile.is_open())
+	{
+		m_csvFile.close();
+	}
+
+	m_isCsvSaving = false;
+
+	// Winsock 정리
+	WSACleanup();
+
+	CDialogEx::OnDestroy();
 }
