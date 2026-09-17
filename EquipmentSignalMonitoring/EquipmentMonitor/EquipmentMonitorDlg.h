@@ -19,7 +19,6 @@ struct EquipmentData
 	double signal = 0.0;
 	int frequency = 0;
 	double temperature = 0.0;
-	CString status;
 };
 
 
@@ -55,7 +54,7 @@ private:
 	SOCKET m_clientSocket;
 	bool m_isConnected;
 
-	double m_temperatureThreshold;
+	double m_signalThreshold;
 	
 	std::vector<double> m_signalHistory;
 

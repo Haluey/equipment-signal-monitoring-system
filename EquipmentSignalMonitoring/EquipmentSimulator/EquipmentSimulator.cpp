@@ -4,8 +4,6 @@
 
 #include <string>
 #include <random>
-#include <thread>
-#include <chrono>
 #include <sstream>
 #include <iomanip>
 
@@ -155,24 +153,12 @@ int main()
             int frequency = frequencyDist(gen);
             double temperature = temperatureDist(gen);
 
-            std::string status;
-
-            if (temperature >= 37.0)
-            {
-                status = "WARNING";
-            }
-            else
-            {
-                status = "NORMAL";
-            }
-
             std::ostringstream oss;
 
             oss << std::fixed << std::setprecision(2)
                 << "Signal=" << signal
                 << ";Frequency=" << frequency
                 << ";Temperature=" << temperature
-                << ";Status=" << status
                 << "\n";
 
             std::string message = oss.str();

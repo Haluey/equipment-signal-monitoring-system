@@ -60,7 +60,7 @@ CEquipmentMonitorDlg::CEquipmentMonitorDlg(CWnd* pParent /*=nullptr*/)
 
 	m_clientSocket = INVALID_SOCKET;
 	m_isConnected = false;
-	m_temperatureThreshold = 37.0;
+	m_signalThreshold = 0.80;
 
 	m_previousStatus = _T("DISCONNECTED");
 	m_isCsvSaving = false;
@@ -154,7 +154,7 @@ BOOL CEquipmentMonitorDlg::OnInitDialog()
 	SetDlgItemText(IDC_STATIC_FREQUENCY, _T("0 Hz"));
 	SetDlgItemText(IDC_STATIC_TEMPERATURE, _T("0.0 °C"));
 	SetDlgItemText(IDC_STATIC_STATUS, _T("DISCONNECTED"));
-	SetDlgItemText(IDC_EDIT_TEMP_THRESHOLD, _T("37.0"));
+	SetDlgItemText(IDC_EDIT_SIGNAL_THRESHOLD, _T("0.80"));
 
 	GetDlgItem(IDC_BUTTON_START)->EnableWindow(FALSE);
 	GetDlgItem(IDC_BUTTON_STOP)->EnableWindow(FALSE);
@@ -362,19 +362,16 @@ UINT CEquipmentMonitorDlg::ReceiveThread(LPVOID pParam)
 			double signal = 0.0;
 			int frequency = 0;
 			double temperature = 0.0;
-			char status[32]{};
 
 			int parsed = sscanf_s(
 				line.c_str(),
-				"Signal=%lf;Frequency=%d;Temperature=%lf;Status=%31s",
+				"Signal=%lf;Frequency=%d;Temperature=%lf",
 				&signal,
 				&frequency,
-				&temperature,
-				status,
-				static_cast<unsigned>(_countof(status))
+				&temperature
 			);
 
-			if (parsed == 4)
+			if (parsed == 3)
 			{
 				EquipmentData* data =
 					new EquipmentData;
@@ -382,7 +379,6 @@ UINT CEquipmentMonitorDlg::ReceiveThread(LPVOID pParam)
 				data->signal = signal;
 				data->frequency = frequency;
 				data->temperature = temperature;
-				data->status = CString(status);
 
 				pDlg->PostMessage(
 					WM_RECEIVE_EQUIPMENT_DATA,
@@ -444,7 +440,7 @@ LRESULT CEquipmentMonitorDlg::OnReceiveEquipmentData(
 
 	CString currentStatus;
 
-	if (data->temperature >= m_temperatureThreshold)
+	if (data->signal >= m_signalThreshold)
 	{
 		currentStatus = _T("WARNING");
 	}
@@ -465,8 +461,8 @@ LRESULT CEquipmentMonitorDlg::OnReceiveEquipmentData(
 			CString warningLog;
 
 			warningLog.Format(
-				_T("WARNING  Temp=%.2f °C"),
-				data->temperature
+				_T("WARNING  Signal=%.2f"),
+				data->signal
 			);
 
 			AddLog(warningLog);
@@ -597,6 +593,83 @@ void CEquipmentMonitorDlg::OnDrawItem(
 	LPDRAWITEMSTRUCT lpDrawItemStruct
 )
 {
+	// Event Log 그리기
+	if (nIDCtl == IDC_LIST_LOG)
+	{
+		CDC dc;
+		dc.Attach(lpDrawItemStruct->hDC);
+
+		CRect rect = lpDrawItemStruct->rcItem;
+
+		if (lpDrawItemStruct->itemID == -1)
+		{
+			dc.Detach();
+			return;
+		}
+
+		CListBox* pList =
+			static_cast<CListBox*>(
+				GetDlgItem(IDC_LIST_LOG)
+				);
+
+		CString text;
+
+		pList->GetText(
+			lpDrawItemStruct->itemID,
+			text
+		);
+
+		COLORREF textColor = RGB(0, 0, 0);
+
+		if (text.Find(_T("COMM ERROR")) != -1)
+		{
+			textColor = RGB(200, 0, 0);
+		}
+		else if (text.Find(_T("WARNING")) != -1)
+		{
+			textColor = RGB(220, 120, 0);
+		}
+		else if (text.Find(_T("RECOVERED")) != -1)
+		{
+			textColor = RGB(0, 140, 0);
+		}
+
+		if (lpDrawItemStruct->itemState & ODS_SELECTED)
+		{
+			dc.FillSolidRect(
+				rect,
+				GetSysColor(COLOR_HIGHLIGHT)
+			);
+
+			dc.SetTextColor(
+				GetSysColor(COLOR_HIGHLIGHTTEXT)
+			);
+		}
+		else
+		{
+			dc.FillSolidRect(
+				rect,
+				GetSysColor(COLOR_WINDOW)
+			);
+
+			dc.SetTextColor(textColor);
+		}
+
+		dc.SetBkMode(TRANSPARENT);
+
+		rect.left += 3;
+
+		dc.DrawText(
+			text,
+			rect,
+			DT_LEFT | DT_VCENTER | DT_SINGLELINE
+		);
+
+		dc.Detach();
+		return;
+	}
+
+	// Real-time Signal
 	if (nIDCtl == IDC_STATIC_GRAPH)
 	{
 		CDC dc;
@@ -604,52 +677,178 @@ void CEquipmentMonitorDlg::OnDrawItem(
 
 		CRect rect = lpDrawItemStruct->rcItem;
 
-		// 배경 지우기
+		// 전체 배경
 		dc.FillSolidRect(rect, RGB(255, 255, 255));
 
-		// 그래프 테두리
-		dc.Rectangle(rect);
-
-		// 그래프 안쪽 여백
+		// 실제 그래프가 그려질 영역
 		CRect graphRect = rect;
-		graphRect.DeflateRect(10, 10);
+		graphRect.left += 30;     // Y축 숫자 공간
+		graphRect.right -= 10;
+		graphRect.top += 10;
+		graphRect.bottom -= 10;
 
-		// 그래프 기준선
+		// 그래프 테두리
+		dc.Rectangle(graphRect);
+
+		CFont smallFont;
+
+		smallFont.CreatePointFont(
+			75,              // 7.5pt
+			_T("Segoe UI")
+		);
+
+		CFont* pOldFont =
+			dc.SelectObject(&smallFont);
+
+		// Y축 라벨
+		const double yValues[] =
+		{
+			1.00,
+			0.75,
+			0.50,
+			0.25,
+			0.00
+		};
+
+		for (double value : yValues)
+		{
+			int y =
+				graphRect.bottom -
+				static_cast<int>(
+					value * graphRect.Height()
+					);
+
+			int labelY = y;
+
+			if (value == 1.00)
+				labelY += 6;
+			else if (value == 0.75)
+				labelY += 4;
+			else if (value == 0.25)
+				labelY -= 4;
+			else if (value == 0.00)
+				labelY -= 6;
+
+			CString label;
+			label.Format(_T("%.2f"), value);
+
+			CRect labelRect(
+				rect.left + 5,
+				labelY - 8,
+				graphRect.left - 8,
+				labelY + 8
+			);
+
+			dc.DrawText(
+				label,
+				&labelRect,
+				DT_RIGHT | DT_VCENTER | DT_SINGLELINE
+			);
+		}
+
+		// 원래 폰트 복구
+		dc.SelectObject(pOldFont);
+
+		// 가로 기준선
 		CPen gridPen(
 			PS_DOT,
 			1,
 			RGB(200, 200, 200)
 		);
 
-		CPen* pOldPen = dc.SelectObject(&gridPen);
+		CPen* oldPen =
+			dc.SelectObject(&gridPen);
 
-		int y25 = graphRect.bottom -
-			static_cast<int>(0.25 * graphRect.Height());
+		const double gridValues[] =
+		{
+			0.25,
+			0.50,
+			0.75
+		};
 
-		int y50 = graphRect.bottom -
-			static_cast<int>(0.50 * graphRect.Height());
+		for (double value : gridValues)
+		{
+			int y =
+				graphRect.bottom -
+				static_cast<int>(
+					value * graphRect.Height()
+					);
 
-		int y75 = graphRect.bottom -
-			static_cast<int>(0.75 * graphRect.Height());
+			dc.MoveTo(graphRect.left, y);
+			dc.LineTo(graphRect.right, y);
+		}
 
-		dc.MoveTo(graphRect.left, y25);
-		dc.LineTo(graphRect.right, y25);
+		dc.SelectObject(oldPen);
 
-		dc.MoveTo(graphRect.left, y50);
-		dc.LineTo(graphRect.right, y50);
+		// Signal Warning Threshold 선
+		int thresholdY =
+			graphRect.bottom -
+			static_cast<int>(
+				m_signalThreshold * graphRect.Height()
+				);
 
-		dc.MoveTo(graphRect.left, y75);
-		dc.LineTo(graphRect.right, y75);
+		CPen thresholdPen(
+			PS_DASH,
+			1,
+			RGB(220, 140, 0)
+		);
 
-		dc.SelectObject(pOldPen);
+		CPen* oldThresholdPen =
+			dc.SelectObject(&thresholdPen);
 
+		// Threshold 선 그리기
+		dc.MoveTo(graphRect.left, thresholdY);
+		dc.LineTo(graphRect.right, thresholdY);
+
+		dc.SelectObject(oldThresholdPen);
+
+		// Threshold 값 표시
+		CString thresholdLabel;
+		thresholdLabel.Format(
+			_T("Threshold %.2f"),
+			m_signalThreshold
+		);
+
+		CRect thresholdTextRect(
+			graphRect.right - 125,
+			thresholdY - 16,
+			graphRect.right - 12,
+			thresholdY
+		);
+
+		CFont thresholdFont;
+		thresholdFont.CreatePointFont(
+			80,                 // 8pt
+			_T("Segoe UI")
+		);
+
+		CFont* oldThresholdFont =
+			dc.SelectObject(&thresholdFont);
+
+		COLORREF oldTextColor =
+			dc.SetTextColor(RGB(220, 140, 0));
+
+		dc.DrawText(
+			thresholdLabel,
+			&thresholdTextRect,
+			DT_RIGHT | DT_SINGLELINE
+		);
+
+		dc.SetTextColor(oldTextColor);
+		dc.SelectObject(oldThresholdFont);
+
+		// Signal 그래프
 		if (m_signalHistory.size() >= 2)
 		{
 			int count =
-				static_cast<int>(m_signalHistory.size());
+				static_cast<int>(
+					m_signalHistory.size()
+					);
 
 			int width = graphRect.Width();
 			int height = graphRect.Height();
+
+			const int maxSamples = 50;
 
 			CPen signalPen(
 				PS_SOLID,
@@ -657,49 +856,87 @@ void CEquipmentMonitorDlg::OnDrawItem(
 				RGB(0, 0, 0)
 			);
 
-			CPen* pOldSignalPen =
+			CPen* oldSignalPen =
 				dc.SelectObject(&signalPen);
 
 			for (int i = 1; i < count; ++i)
 			{
-				double previousValue =
-					m_signalHistory[i - 1];
-
-				double currentValue =
-					m_signalHistory[i];
-
 				int x1 =
 					graphRect.left +
-					(i - 1) * width / (count - 1);
+					(i - 1) * width / (maxSamples - 1);
 
 				int x2 =
 					graphRect.left +
-					i * width / (count - 1);
+					i * width / (maxSamples - 1);
 
 				int y1 =
 					graphRect.bottom -
 					static_cast<int>(
-						previousValue * height
+						m_signalHistory[i - 1] * height
 						);
 
 				int y2 =
 					graphRect.bottom -
 					static_cast<int>(
-						currentValue * height
+						m_signalHistory[i] * height
 						);
 
 				dc.MoveTo(x1, y1);
 				dc.LineTo(x2, y2);
 			}
 
-			dc.SelectObject(pOldSignalPen);
+			// 최신 Signal 위치 표시
+			int lastIndex = count - 1;
+
+			int lastX =
+				graphRect.left +
+				lastIndex * width / (maxSamples - 1);
+
+			int lastY =
+				graphRect.bottom -
+				static_cast<int>(
+					m_signalHistory[lastIndex] * height
+					);
+
+			COLORREF pointColor = RGB(0, 0, 0);
+
+			if (m_signalHistory[lastIndex] >= m_signalThreshold)
+			{
+				pointColor = RGB(220, 60, 60);
+			}
+
+			// 바깥 테두리
+			CPen pointPen(
+				PS_SOLID,
+				2,
+				pointColor
+			);
+
+			// 내부 채우기
+			CBrush pointBrush(pointColor);
+
+			CPen* oldPointPen =
+				dc.SelectObject(&pointPen);
+
+			CBrush* oldBrush =
+				dc.SelectObject(&pointBrush);
+
+			dc.Ellipse(
+				lastX - 4,
+				lastY - 4,
+				lastX + 4,
+				lastY + 4
+			);
+
+			dc.SelectObject(oldPointPen);
+			dc.SelectObject(oldBrush);
 		}
 
 		dc.Detach();
-
 		return;
 	}
 
+	// 기본 OnDrawItem
 	CDialogEx::OnDrawItem(
 		nIDCtl,
 		lpDrawItemStruct
@@ -757,6 +994,19 @@ LRESULT CEquipmentMonitorDlg::OnDisconnected(
 
 	// 이전 상태 초기화
 	m_previousStatus = _T("DISCONNECTED");
+
+	// 연결 종료 시 CSV 저장도 종료
+	if (m_csvFile.is_open())
+	{
+		m_csvFile.close();
+	}
+
+	m_isCsvSaving = false;
+
+	SetDlgItemText(
+		IDC_BUTTON_SAVE_CSV,
+		_T("SAVE CSV")
+	);
 
 	AddLog(_T("DISCONNECTED"));
 
@@ -851,28 +1101,58 @@ void CEquipmentMonitorDlg::OnBnClickedButtonApplyThreshold()
 	CString thresholdText;
 
 	GetDlgItemText(
-		IDC_EDIT_TEMP_THRESHOLD,
+		IDC_EDIT_SIGNAL_THRESHOLD,
 		thresholdText
 	);
 
-	double newThreshold = _ttof(thresholdText);
+	thresholdText.Trim();
 
-	if (newThreshold <= 0.0)
+	if (thresholdText.IsEmpty())
 	{
 		AfxMessageBox(
-			_T("Please enter a valid temperature threshold.")
+			_T("Please enter a Signal Level.")
+		);
+		return;
+	}
+
+	const TCHAR* start = thresholdText.GetString();
+	TCHAR* end = nullptr;
+
+	double newThreshold = _tcstod(start, &end);
+
+	if (end == start || *end != _T('\0'))
+	{
+		AfxMessageBox(
+			_T("Please enter a numeric value between 0.0 and 1.0.")
 		);
 
 		return;
 	}
 
-	m_temperatureThreshold = newThreshold;
+	// Signal Level은 0.0 ~ 1.0 범위
+	if (newThreshold < 0.0 || newThreshold > 1.0)
+	{
+		AfxMessageBox(
+			_T("Please enter a Signal Level between 0.0 and 1.0.")
+		);
+
+		return;
+	}
+
+	m_signalThreshold = newThreshold;
+
+	CWnd* pGraph = GetDlgItem(IDC_STATIC_GRAPH);
+
+	if (pGraph != nullptr)
+	{
+		pGraph->Invalidate();
+	}
 
 	CString logText;
 
 	logText.Format(
-		_T("THRESHOLD CHANGED  Temp=%.1f C"),
-		m_temperatureThreshold
+		_T("THRESHOLD CHANGED  Signal=%.2f"),
+		m_signalThreshold
 	);
 
 	AddLog(logText);

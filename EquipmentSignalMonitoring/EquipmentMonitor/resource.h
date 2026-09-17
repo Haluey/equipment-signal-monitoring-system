@@ -19,7 +19,7 @@
 #define IDC_STATIC_GRAPH                1010
 #define IDC_LIST_LOG                    1012
 #define IDC_BUTTON_SAVE_CSV             1013
-#define IDC_EDIT_TEMP_THRESHOLD         1014
+#define IDC_EDIT_SIGNAL_THRESHOLD       1014
 #define IDC_BUTTON_APPLY_THRESHOLD      1015
 
 // Next default values for new objects
