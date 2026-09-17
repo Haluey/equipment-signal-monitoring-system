@@ -930,6 +930,7 @@ void CEquipmentMonitorDlg::OnDrawItem(
 
 			dc.SelectObject(oldPointPen);
 			dc.SelectObject(oldBrush);
+			dc.SelectObject(oldSignalPen);
 		}
 
 		dc.Detach();
